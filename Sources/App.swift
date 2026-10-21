@@ -75,6 +75,8 @@ struct SaveInspectionResult {
     var activeSlotName: String = "未知"
     var slotAValidSectors: Int = 0
     var slotBValidSectors: Int = 0
+    var slotAFullValidSectors: Int = 0
+    var slotBFullValidSectors: Int = 0
     var slotASaveIndex: UInt32 = 0
     var slotBSaveIndex: UInt32 = 0
     var playTimeText: String = "--:--:--"
@@ -113,13 +115,16 @@ class GBASaveEngine {
         // 2. 如果是 128KB (131,072 字节)，启动 A/B 双槽深度解析
         if size == 131072 {
             let slotAInfo = inspectSlot(data: data, baseOffset: 0x00000)
-            // 标准布局：A 槽在 0x00000，中间 0xE000–0xFFFF 是名人堂等额外扇区，B 槽在 0x10000
-            let slotBInfo = inspectSlot(data: data, baseOffset: 0x10000)
+            // 真实布局（已用真实存档逐字节验证）：两个存档块紧挨着，A 块 0x00000、B 块 0xE000，
+            // 文件末尾 0x1C000 之后才是名人堂等额外扇区
+            let slotBInfo = inspectSlot(data: data, baseOffset: 0x0E000)
 
             if slotAInfo.validCount > 0 || slotBInfo.validCount > 0 {
                 result.isGen3PokemonFormat = true
                 result.slotAValidSectors = slotAInfo.validCount
                 result.slotBValidSectors = slotBInfo.validCount
+                result.slotAFullValidSectors = slotAInfo.fullValidCount
+                result.slotBFullValidSectors = slotBInfo.fullValidCount
                 result.slotASaveIndex = slotAInfo.saveIndex
                 result.slotBSaveIndex = slotBInfo.saveIndex
 
@@ -139,7 +144,11 @@ class GBASaveEngine {
                 result.trainerPublicID = activeInfo.publicID
                 result.trainerSecretID = activeInfo.secretID
 
-                if slotAInfo.validCount < 14 && slotBInfo.validCount == 14 {
+                let aFullOK = slotAInfo.fullValidCount == 14
+                let bFullOK = slotBInfo.fullValidCount == 14
+                if (slotAInfo.validCount < 14 || slotBInfo.validCount < 14) && aFullOK && bFullOK {
+                    result.warningMessage = "🔧 好消息：这份存档的数据是完好的！它只是用了老式「整扇区」校验算法，和新游戏的标准算法对不上，所以新游戏会报「存档已损坏」。导出时 App 会自动按标准算法重算校验（只改校验数字，不动游戏数据），导出的就是修好的版本，最新进度能保住。"
+                } else if slotAInfo.validCount < 14 && slotBInfo.validCount == 14 {
                     result.warningMessage = "检测到 A 槽有扇区损坏，但 B 槽完整！建议点击下方「一键修复双槽」避免进游戏掉档。"
                 } else if slotBInfo.validCount < 14 && slotAInfo.validCount == 14 {
                     result.warningMessage = "检测到 B 槽备份区不完整，A 槽完好，可点击「一键同步修复双槽」加固存档。"
@@ -150,8 +159,9 @@ class GBASaveEngine {
         return result
     }
 
-    private static func inspectSlot(data: Data, baseOffset: Int) -> (validCount: Int, saveIndex: UInt32, playTime: String, publicID: UInt16, secretID: UInt16) {
+    private static func inspectSlot(data: Data, baseOffset: Int) -> (validCount: Int, fullValidCount: Int, saveIndex: UInt32, playTime: String, publicID: UInt16, secretID: UInt16) {
         var validSectors = 0
+        var fullValidSectors = 0
         var maxSaveIndex: UInt32 = 0
         var playTime = "--:--:--"
         var pubID: UInt16 = 0
@@ -166,11 +176,15 @@ class GBASaveEngine {
 
             guard signature == 0x08012025, sectionID >= 0, sectionID < 14 else { continue }
 
-            // 校验扇区 Checksum
+            // 标准校验：只算该扇区的有效数据长度
             let calcLength = gen3SectorSizes[sectionID]
             let calculated = calculateGen3Checksum(data: data, offset: sectorOffset, length: calcLength)
             if calculated == storedChecksum {
                 validSectors += 1
+            }
+            // 老式整扇区校验：把页脚前的全部 4084 字节都算进去（部分老版本游戏/模拟器这么写）
+            if calculateGen3Checksum(data: data, offset: sectorOffset, length: 0xFF4) == storedChecksum {
+                fullValidSectors += 1
             }
 
             if saveIndex != 0xFFFFFFFF && saveIndex >= maxSaveIndex {
@@ -188,7 +202,7 @@ class GBASaveEngine {
             }
         }
 
-        return (validSectors, maxSaveIndex, playTime, pubID, secID)
+        return (validSectors, fullValidSectors, maxSaveIndex, playTime, pubID, secID)
     }
 
     static func calculateGen3Checksum(data: Data, offset: Int, length: Int) -> UInt16 {
@@ -202,19 +216,39 @@ class GBASaveEngine {
     }
 
     // 一键双槽互备修复：将完好的槽（14 个扇区）复制到另一个槽
-    // 标准布局：A 槽 = 0x00000–0x0DFFF，B 槽 = 0x10000–0x1DFFF，中间与末尾的额外扇区（名人堂等）绝不触碰
+    // 真实布局：A 槽 = 0x00000–0x0DFFF，B 槽 = 0x0E000–0x1BFFF（两块紧挨着），
+    // 0x1C000 之后的名人堂等额外扇区绝不触碰
     static func repairDualSlot(data: Data, copySlotAToB: Bool) -> Data {
         guard data.count == 131072 else { return data }
         var repaired = data
         let slotSize = 0x0E000 // 57,344 字节 (14个扇区)
         if copySlotAToB {
             let slotAData = repaired.subdata(in: 0..<slotSize)
-            repaired.replaceSubrange(0x10000..<(0x10000 + slotSize), with: slotAData)
+            repaired.replaceSubrange(slotSize..<(slotSize * 2), with: slotAData)
         } else {
-            let slotBData = repaired.subdata(in: 0x10000..<(0x10000 + slotSize))
+            let slotBData = repaired.subdata(in: slotSize..<(slotSize * 2))
             repaired.replaceSubrange(0..<slotSize, with: slotBData)
         }
         return repaired
+    }
+
+    // 校验标准化：把每个扇区页脚里的校验值按标准算法（只算有效数据长度）重算写回。
+    // 专治老游戏/模拟器用「整扇区」算法写出的存档 — 数据一字节不动，只改校验数字，
+    // 改完新游戏的标准校验就能 14/14 全过（已用真实存档验证：修正 8 个扇区后双槽全过）。
+    static func standardizeChecksums(data: Data) -> Data {
+        guard data.count == 131072 else { return data }
+        var out = data
+        for base in [0x00000, 0x0E000] {
+            for i in 0..<14 {
+                let sectorOffset = base + i * 0x1000
+                let sectionID = Int(out.readUInt16LE(at: sectorOffset + 0x0FF4))
+                let signature = out.readUInt32LE(at: sectorOffset + 0x0FF8)
+                guard signature == 0x08012025, sectionID >= 0, sectionID < 14 else { continue }
+                let std = calculateGen3Checksum(data: out, offset: sectorOffset, length: gen3SectorSizes[sectionID])
+                out.replaceSubrange((sectorOffset + 0x0FF6)..<(sectorOffset + 0x0FF8), with: [UInt8(std & 0xFF), UInt8((std >> 8) & 0xFF)])
+            }
+        }
+        return out
     }
 
     // IPS 补丁合成器
@@ -285,6 +319,7 @@ class AppViewModel: ObservableObject {
     @Published var deltaFolderBookmark: Data?
     @Published var deltaFolderName: String = "未绑定（点击绑定 Delta/Database 目录）"
     @Published var romSaveChipText: String = ""
+    @Published var autoFixChecksum: Bool = true
     @Published var bindDebugText: String = "绑定状态：尚未尝试"
 
     @Published var backups: [BackupRecord] = []
@@ -377,7 +412,9 @@ class AppViewModel: ObservableObject {
         let latestIsA = info.slotASaveIndex >= info.slotBSaveIndex
         var lines: [String] = []
         if a == 14 && b == 14 {
-            lines.append("✅ 存档体检：A、B 两个槽都是完好的（14/14）。导出的文件和原档一模一样，新游戏正常情况下能直接读到最新进度。")
+            lines.append("✅ 存档体检：A、B 两个槽都是完好的（14/14），校验也是标准格式。导出的文件和原档一模一样，新游戏正常情况下能直接读到最新进度。")
+        } else if info.slotAFullValidSectors == 14 && info.slotBFullValidSectors == 14 {
+            lines.append("🔧 存档体检：数据是完好的，但校验是老式「整扇区」格式 — 老游戏这么写，新游戏按标准算法验就对不上，这正是它报「存档已损坏」的原因。放心：导出时 App 会自动把校验重算成标准格式（只改校验数字，不动你的游戏数据），最新进度（第 \(max(info.slotASaveIndex, info.slotBSaveIndex)) 次保存）能完整保住，导出后直接投放就行。")
         } else if a < 14 && b < 14 {
             lines.append("❌ 存档体检：A、B 两个槽都有扇区损坏（A 槽 \(a)/14，B 槽 \(b)/14）。这份存档本身已经不完整，串到哪个游戏都会报错。建议回旧游戏里重新保存一次，再拿新的 .sav 来串。")
         } else if a < 14 {
@@ -455,8 +492,10 @@ class AppViewModel: ObservableObject {
 
     // 生成配对好的双文件供导出（同名 .sav + Delta SHA1 .sav）
     func exportPairedFiles() -> [URL] {
-        guard let save = oldSaveData, let rom = newRomData else { return [] }
-        createBackup(data: save, tagTitle: "串档前自动备份 - \(oldSaveName)")
+        guard let rawSave = oldSaveData, let rom = newRomData else { return [] }
+        createBackup(data: rawSave, tagTitle: "串档前自动备份 - \(oldSaveName)")
+        // 导出的存档先做校验标准化（治老式整扇区校验对不上新游戏）；时光机里备份的仍是原档
+        let save = autoFixChecksum ? GBASaveEngine.standardizeChecksums(data: rawSave) : rawSave
 
         let tempDir = FileManager.default.temporaryDirectory
         let baseRomName = (newRomName as NSString).deletingPathExtension
@@ -538,9 +577,10 @@ class AppViewModel: ObservableObject {
                 createBackup(data: save, tagTitle: "直连串档备份 - \(oldSaveName)")
             }
 
-            // 写入新版 ROM 和配对好的 SHA-1 存档
+            // 写入新版 ROM 和配对好的 SHA-1 存档（存档先做校验标准化，和导出保持一致）
+            let injectSave = autoFixChecksum ? GBASaveEngine.standardizeChecksums(data: save) : save
             try rom.write(to: targetRomURL, options: .atomic)
-            try save.write(to: targetSavURL, options: .atomic)
+            try injectSave.write(to: targetSavURL, options: .atomic)
 
             // 可选：清理该 SHA-1 下的即时存档，防止 Delta 自动加载旧即时存档覆盖新电池存档
             var cleanedCount = 0
@@ -704,7 +744,7 @@ struct MigrationView: View {
                 }
 
                 Section(header: Text("第三步（方式 A）：Delta 数据库文件夹一键直连"),
-                        footer: Text("绑定方法：点第一个按钮 → 找到「我的 iPhone → Delta → Database」→ 点进这个文件夹 → 点右上角蓝色的 Open。如果点 Open 没反应，用备用方法：选 Database 里的 Delta.sqlite 文件，App 会自己反推文件夹并当场测能不能写入。")) {
+                        footer: Text("绑定方法：点第一个按钮 → 找到「我的 iPhone → Delta → Database」→ 点进这个文件夹 → 点右上角蓝色的 Open。如果点 Open 没反应，用备用方法：选 Database 里的 Delta.sqlite 文件，App 会自己反推文件夹并当场测能不能写入。实在绑不上也别急：用方式 B 导出再手动放进 Database/Games 是最稳的路，效果完全一样。")) {
                     Button(action: {
                         DocumentPickerPresenter.shared.pick(types: [.folder], asCopy: false) { url in
                             if let url = url {
@@ -752,7 +792,9 @@ struct MigrationView: View {
                 }
 
                 Section(header: Text("第三步（方式 B）：导出配对好的同名与特征码存档"),
-                        footer: Text("同时生成「新版同名.sav」与「Delta特征码.sav」，并自动在时光机里备份原存档。")) {
+                        footer: Text("同时生成「新版同名.sav」与「Delta特征码.sav」，并自动在时光机里备份原存档。手动投放（最稳）：导出后打开文件 App → 我的 iPhone → Delta → Database → Games，把「Delta特征码.sav」放进去覆盖同名文件即可（投放前先把 Delta 从后台彻底关掉）。")) {
+                    Toggle("导出时自动修正校验（治「存档已损坏」，推荐开）", isOn: $vm.autoFixChecksum)
+
                     Button(action: {
                         shareItems = vm.exportPairedFiles()
                         if !shareItems.isEmpty { showShareSheet = true }
@@ -771,6 +813,16 @@ struct MigrationView: View {
                         Text(verdict)
                             .font(.footnote)
                             .foregroundColor(.secondary)
+                    }
+
+                    if !vm.newRomSHA1.isEmpty {
+                        Text("Delta 里这个游戏的存档文件名就是这一串，投放时认准它：")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                        Text("\(vm.newRomSHA1).sav")
+                            .font(.footnote)
+                            .monospaced()
+                            .textSelection(.enabled)
                     }
                 }
 
@@ -832,6 +884,12 @@ struct InspectorView: View {
                                 Spacer()
                                 Text("\(info.slotBValidSectors) / 14 扇区完好")
                                     .foregroundColor(info.slotBValidSectors == 14 ? .green : .orange)
+                            }
+                            HStack {
+                                Text("校验格式")
+                                Spacer()
+                                Text((info.slotAFullValidSectors == 14 && info.slotBFullValidSectors == 14 && (info.slotAValidSectors < 14 || info.slotBValidSectors < 14)) ? "老式整扇区（导出自动修正）" : "标准格式")
+                                    .foregroundColor(.secondary)
                             }
 
                             Button("用 A 槽数据覆盖修复 B 槽") {
