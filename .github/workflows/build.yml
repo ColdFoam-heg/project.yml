@@ -1,0 +1,42 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - name: 1. 检出代码
+        uses: actions/checkout@v4
+
+      - name: 2. 生成 Xcode 工程 (XcodeGen)
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: 3. 编译无签名 App
+        run: |
+          xcodebuild clean build \
+            -project GBASaveMaster.xcodeproj \
+            -scheme GBASaveMaster \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 4. 打包成 .ipa 安装包
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/GBASaveMaster.app Payload/
+          zip -r GBASaveMaster_Unsigned.ipa Payload
+
+      - name: 5. 上传 .ipa 成品供下载
+        uses: actions/upload-artifact@v4
+        with:
+          name: GBASaveMaster-IPA
+          path: GBASaveMaster_Unsigned.ipa
