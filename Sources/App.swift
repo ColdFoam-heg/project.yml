@@ -396,7 +396,7 @@ class AppViewModel: ObservableObject {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         do {
-            let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            let bookmark = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(bookmark, forKey: "DeltaDatabaseBookmark")
             self.deltaFolderBookmark = bookmark
             self.deltaFolderName = "已绑定：\(url.lastPathComponent)"
