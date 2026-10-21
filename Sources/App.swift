@@ -113,7 +113,8 @@ class GBASaveEngine {
         // 2. 如果是 128KB (131,072 字节)，启动 A/B 双槽深度解析
         if size == 131072 {
             let slotAInfo = inspectSlot(data: data, baseOffset: 0x00000)
-            let slotBInfo = inspectSlot(data: data, baseOffset: 0x0E000)
+            // 标准布局：A 槽在 0x00000，中间 0xE000–0xFFFF 是名人堂等额外扇区，B 槽在 0x10000
+            let slotBInfo = inspectSlot(data: data, baseOffset: 0x10000)
 
             if slotAInfo.validCount > 0 || slotBInfo.validCount > 0 {
                 result.isGen3PokemonFormat = true
@@ -200,16 +201,17 @@ class GBASaveEngine {
         return UInt16(folded & 0xFFFF)
     }
 
-    // 一键双槽互备修复：将完好的 56KB 槽复制到另一个槽
+    // 一键双槽互备修复：将完好的槽（14 个扇区）复制到另一个槽
+    // 标准布局：A 槽 = 0x00000–0x0DFFF，B 槽 = 0x10000–0x1DFFF，中间与末尾的额外扇区（名人堂等）绝不触碰
     static func repairDualSlot(data: Data, copySlotAToB: Bool) -> Data {
         guard data.count == 131072 else { return data }
         var repaired = data
         let slotSize = 0x0E000 // 57,344 字节 (14个扇区)
         if copySlotAToB {
             let slotAData = repaired.subdata(in: 0..<slotSize)
-            repaired.replaceSubrange(slotSize..<(slotSize * 2), with: slotAData)
+            repaired.replaceSubrange(0x10000..<(0x10000 + slotSize), with: slotAData)
         } else {
-            let slotBData = repaired.subdata(in: slotSize..<(slotSize * 2))
+            let slotBData = repaired.subdata(in: 0x10000..<(0x10000 + slotSize))
             repaired.replaceSubrange(0..<slotSize, with: slotBData)
         }
         return repaired
@@ -282,6 +284,8 @@ class AppViewModel: ObservableObject {
 
     @Published var deltaFolderBookmark: Data?
     @Published var deltaFolderName: String = "未绑定（点击绑定 Delta/Database 目录）"
+    @Published var romSaveChipText: String = ""
+    @Published var bindDebugText: String = "绑定状态：尚未尝试"
 
     @Published var backups: [BackupRecord] = []
     @Published var statusMessage: String = "准备就绪：请先导入旧版 .sav 存档与新版 .gba 游戏"
@@ -338,12 +342,89 @@ class AppViewModel: ObservableObject {
         self.newRomData = data
         self.newRomName = name
         self.newRomSHA1 = data.sha1Hex
+        self.romSaveChipText = Self.detectRomSaveChip(data: data)
         // 读取 GBA 卡带头部 0xA0 处的 12 字节内部英文标识
         if data.count >= 0xAC {
             let headerSlice = data.subdata(in: 0xA0..<0xAC)
             self.newRomInternalTitle = String(data: headerSlice, encoding: .ascii)?.trimmingCharacters(in: .controlCharacters) ?? "GBA_ROM"
         }
         statusMessage = "已计算新版游戏 SHA-1 特征码"
+    }
+
+    // 扫描 ROM 内部的存档芯片标记（GBA 游戏靠这串字符声明自己用哪种存档芯片）
+    static func detectRomSaveChip(data: Data) -> String {
+        let markers: [(String, String)] = [
+            ("FLASH1M_V", "Flash 128KB（FLASH1M）"),
+            ("FLASH512_V", "Flash 64KB（FLASH512）"),
+            ("FLASH_V", "Flash 64KB"),
+            ("SRAM_V", "SRAM 32KB"),
+            ("EEPROM_V", "EEPROM 小容量")
+        ]
+        for (marker, label) in markers {
+            if data.range(of: Data(marker.utf8)) != nil { return label }
+        }
+        return "未找到存档芯片标记"
+    }
+
+    // 导出前的大白话体检结论（存档与新游戏都选好后才有）
+    var migrationVerdict: String? {
+        guard let info = saveInspection, newRomData != nil else { return nil }
+        guard info.isGen3PokemonFormat else {
+            return "这份存档不是标准的宝可梦 128KB 双槽格式，没法做槽位体检。导出的文件与原档完全一致，能不能读取决于新游戏本身是否兼容这份存档。\n小提示：把存档放进 Delta 之前，先把 Delta 从后台彻底划掉关掉，再替换文件，最后重新打开。"
+        }
+        let a = info.slotAValidSectors
+        let b = info.slotBValidSectors
+        let latestIsA = info.slotASaveIndex >= info.slotBSaveIndex
+        var lines: [String] = []
+        if a == 14 && b == 14 {
+            lines.append("✅ 存档体检：A、B 两个槽都是完好的（14/14）。导出的文件和原档一模一样，新游戏正常情况下能直接读到最新进度。")
+        } else if a < 14 && b < 14 {
+            lines.append("❌ 存档体检：A、B 两个槽都有扇区损坏（A 槽 \(a)/14，B 槽 \(b)/14）。这份存档本身已经不完整，串到哪个游戏都会报错。建议回旧游戏里重新保存一次，再拿新的 .sav 来串。")
+        } else if a < 14 {
+            if latestIsA {
+                lines.append("⚠️ 存档体检：最新那份存档在 A 槽，它有扇区损坏（\(a)/14），B 槽是完好的。这正是新游戏提示「存档已损坏」的原因 — 它会改读上一次的进度。可以去「存档透视与修复」页用完好的 B 槽修复后再导出，就不会再报错（进度是上一次保存的）。")
+            } else {
+                lines.append("✅ 存档体检：最新那份存档（B 槽）是完好的（14/14），可以放心串档。A 槽有点小毛病不影响使用，想加固可以去修复页同步一下。")
+            }
+        } else {
+            if latestIsA {
+                lines.append("✅ 存档体检：最新那份存档（A 槽）是完好的（14/14），可以放心串档。B 槽有点小毛病不影响使用，想加固可以去修复页同步一下。")
+            } else {
+                lines.append("⚠️ 存档体检：最新那份存档在 B 槽，它有扇区损坏（\(b)/14），A 槽是完好的。这正是新游戏提示「存档已损坏」的原因 — 它会改读上一次的进度。可以去「存档透视与修复」页用完好的 A 槽修复后再导出，就不会再报错（进度是上一次保存的）。")
+            }
+        }
+        if romSaveChipText.hasPrefix("未找到") {
+            lines.append("⚠️ 另外：新游戏里没找到存档芯片标记，它可能认不出 128KB 存档 — 这种情况游戏也会报「存档已损坏」，属于游戏 ROM 本身的问题，换个来源的 ROM 再试。")
+        } else if !romSaveChipText.isEmpty && !romSaveChipText.contains("128KB") {
+            lines.append("⚠️ 另外：新游戏标记的存档芯片是「\(romSaveChipText)」，不是 128KB 类型，和这份 128KB 存档对不上，游戏大概率会报存档已损坏。")
+        }
+        lines.append("小提示：把存档放进 Delta 之前，先把 Delta 从后台彻底划掉关掉，再替换文件，最后重新打开 — 游戏开着的时候换存档容易读错。")
+        return lines.joined(separator: "\n")
+    }
+
+    // 备用绑定：用户选 Database 文件夹里的任意一个文件，反推文件夹并当场做写入测试
+    func bindDeltaFolderByFile(url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        let folderURL = url.deletingLastPathComponent()
+        do {
+            // 先做真实写入测试：建 Games 目录、写探针文件再删掉
+            let gamesURL = folderURL.appendingPathComponent("Games", isDirectory: true)
+            try FileManager.default.createDirectory(at: gamesURL, withIntermediateDirectories: true)
+            let probe = gamesURL.appendingPathComponent(".lengmo_probe")
+            try Data([0x4C]).write(to: probe)
+            try FileManager.default.removeItem(at: probe)
+            // 写入没问题，再存文件夹书签供以后注入使用
+            let bookmark = try folderURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(bookmark, forKey: "DeltaDatabaseBookmark")
+            self.deltaFolderBookmark = bookmark
+            self.deltaFolderName = "已绑定：\(folderURL.lastPathComponent)"
+            bindDebugText = "绑定状态：选文件绑定成功（\(folderURL.lastPathComponent)），写入测试通过"
+            triggerAlert(title: "✅ 绑定成功", body: "已通过你选的文件反推绑定「\(folderURL.lastPathComponent)」文件夹，并通过了实际写入测试，现在可以一键注入了。")
+        } catch {
+            bindDebugText = "绑定状态：选文件绑定失败 — \(error.localizedDescription)"
+            triggerAlert(title: "选文件绑定失败", body: "拿到了文件「\(url.lastPathComponent)」，但没能取得它所在文件夹的写入权限。\n\n请改用文件夹绑定：走进 Database 文件夹后，点右上角蓝色的 Open 按钮。\n错误详情：\(error.localizedDescription)")
+        }
     }
 
     // 自动备份进时光机
@@ -403,8 +484,10 @@ class AppViewModel: ObservableObject {
             UserDefaults.standard.set(bookmark, forKey: "DeltaDatabaseBookmark")
             self.deltaFolderBookmark = bookmark
             self.deltaFolderName = "已绑定：\(url.lastPathComponent)"
+            bindDebugText = "绑定状态：文件夹绑定成功（\(url.lastPathComponent)）"
             triggerAlert(title: "✅ Delta 目录绑定成功", body: "已绑定文件夹「\(url.lastPathComponent)」，现在可以一键直连注入了。")
         } catch {
+            bindDebugText = "绑定状态：文件夹绑定失败 — \(error.localizedDescription)"
             triggerAlert(title: "目录授权失败", body: error.localizedDescription)
         }
     }
@@ -486,7 +569,7 @@ class AppViewModel: ObservableObject {
         let repaired = GBASaveEngine.repairDualSlot(data: save, copySlotAToB: copyAToB)
         self.oldSaveData = repaired
         self.saveInspection = GBASaveEngine.inspect(data: repaired, fileName: oldSaveName)
-        triggerAlert(title: "双槽修复完成", body: copyAToB ? "已将 A 槽完整数据同步至 B 槽！" : "已用 B 槽备份数据成功恢复 A 槽！")
+        triggerAlert(title: "双槽修复完成", body: (copyAToB ? "已将 A 槽完整数据同步至 B 槽！" : "已用 B 槽备份数据成功恢复 A 槽！") + "\n修复只改了 App 里的这份存档，记得回「一键串档」页重新导出配对文件再进游戏。")
     }
 
     func triggerAlert(title: String, body: String) {
@@ -610,20 +693,45 @@ struct MigrationView: View {
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                 }
+                                if !vm.romSaveChipText.isEmpty {
+                                    Text("存档芯片标记: \(vm.romSaveChipText)")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
                     }
                 }
 
                 Section(header: Text("第三步（方式 A）：Delta 数据库文件夹一键直连"),
-                        footer: Text("首次使用点上方绑定「我的 iPhone -> Delta -> Database」文件夹，即可一键把存档精准替换进 Delta 内部，无需手动改名。")) {
+                        footer: Text("绑定方法：点第一个按钮 → 找到「我的 iPhone → Delta → Database」→ 点进这个文件夹 → 点右上角蓝色的 Open。如果点 Open 没反应，用备用方法：选 Database 里的 Delta.sqlite 文件，App 会自己反推文件夹并当场测能不能写入。")) {
                     Button(action: {
                         DocumentPickerPresenter.shared.pick(types: [.folder], asCopy: false) { url in
-                            if let url = url { vm.bindDeltaDatabaseFolder(url: url) }
+                            if let url = url {
+                                vm.bindDeltaDatabaseFolder(url: url)
+                            } else {
+                                vm.bindDebugText = "绑定状态：文件夹选择被取消，没收到文件夹（记得走进 Database 后点右上角 Open）"
+                            }
                         }
                     }) {
                         Label(vm.deltaFolderName, systemImage: "folder.fill.badge.gearshape")
                     }
+
+                    Button(action: {
+                        DocumentPickerPresenter.shared.pick(types: [.data, .item], asCopy: false) { url in
+                            if let url = url {
+                                vm.bindDeltaFolderByFile(url: url)
+                            } else {
+                                vm.bindDebugText = "绑定状态：文件选择被取消"
+                            }
+                        }
+                    }) {
+                        Label("备用方法：选 Database 里的文件来绑定", systemImage: "doc.badge.gearshape")
+                    }
+
+                    Text(vm.bindDebugText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
 
                     Toggle("顺手清理新版自动即时存档（防冲突）", isOn: $cleanAutoStates)
 
@@ -658,6 +766,12 @@ struct MigrationView: View {
                         }
                     }
                     .disabled(vm.oldSaveData == nil || vm.newRomData == nil)
+
+                    if let verdict = vm.migrationVerdict {
+                        Text(verdict)
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Section {
