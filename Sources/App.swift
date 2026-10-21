@@ -820,8 +820,7 @@ struct MigrationView: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
                         Text("\(vm.newRomSHA1).sav")
-                            .font(.footnote)
-                            .monospaced()
+                            .font(.system(.footnote, design: .monospaced))
                             .textSelection(.enabled)
                     }
                 }
