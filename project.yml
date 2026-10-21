@@ -1,0 +1,23 @@
+name: GBASaveMaster
+options:
+  bundleIdPrefix: com.panqixin
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  GBASaveMaster:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: "GBA串档神器"
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportsDocumentBrowser: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
