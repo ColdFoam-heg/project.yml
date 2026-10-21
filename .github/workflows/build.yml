@@ -7,10 +7,15 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: 1. 检出代码
         uses: actions/checkout@v4
+
+      - name: 1.5 选择最新 Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: 2. 生成 Xcode 工程 (XcodeGen)
         run: |
