@@ -16,8 +16,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: "GBA串档神器"
-        CFBundleShortVersionString: "1.1.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2.0"
+        CFBundleVersion: "3"
         NSHumanReadableCopyright: "© 2026 LengMo"
         UILaunchScreen: {}
         UIFileSharingEnabled: true
