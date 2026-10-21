@@ -147,7 +147,7 @@ class GBASaveEngine {
                 let aFullOK = slotAInfo.fullValidCount == 14
                 let bFullOK = slotBInfo.fullValidCount == 14
                 if (slotAInfo.validCount < 14 || slotBInfo.validCount < 14) && aFullOK && bFullOK {
-                    result.warningMessage = "🔧 好消息：这份存档的数据是完好的！它只是用了老式「整扇区」校验算法，和新游戏的标准算法对不上，所以新游戏会报「存档已损坏」。导出时 App 会自动按标准算法重算校验（只改校验数字，不动游戏数据），导出的就是修好的版本，最新进度能保住。"
+                    result.warningMessage = "🔧 这份存档的数据本身是完好的，但它用的是老式「整扇区」校验，和有些新游戏的验法对不上，会报「存档已损坏」。导出时 App 会自动把校验重算成标准格式（只改校验数字，不动游戏数据）— 如果新游戏只是校验方式不同，修完就能读；如果新游戏把存档骨架都换了（部分续作会），那属于版本不兼容，文件层面没法迁移。"
                 } else if slotAInfo.validCount < 14 && slotBInfo.validCount == 14 {
                     result.warningMessage = "检测到 A 槽有扇区损坏，但 B 槽完整！建议点击下方「一键修复双槽」避免进游戏掉档。"
                 } else if slotBInfo.validCount < 14 && slotAInfo.validCount == 14 {
@@ -414,7 +414,7 @@ class AppViewModel: ObservableObject {
         if a == 14 && b == 14 {
             lines.append("✅ 存档体检：A、B 两个槽都是完好的（14/14），校验也是标准格式。导出的文件和原档一模一样，新游戏正常情况下能直接读到最新进度。")
         } else if info.slotAFullValidSectors == 14 && info.slotBFullValidSectors == 14 {
-            lines.append("🔧 存档体检：数据是完好的，但校验是老式「整扇区」格式 — 老游戏这么写，新游戏按标准算法验就对不上，这正是它报「存档已损坏」的原因。放心：导出时 App 会自动把校验重算成标准格式（只改校验数字，不动你的游戏数据），最新进度（第 \(max(info.slotASaveIndex, info.slotBSaveIndex)) 次保存）能完整保住，导出后直接投放就行。")
+            lines.append("🔧 存档体检：数据是完好的，但校验是老式「整扇区」格式，新游戏按标准算法验会对不上，可能报「存档已损坏」。导出时 App 会自动把校验重算成标准格式（只改校验数字，不动游戏数据）。如果新游戏只是校验方式不同，修完就能读到最新进度（第 \(max(info.slotASaveIndex, info.slotBSaveIndex)) 次保存）；但如果新游戏把存档骨架都换了（部分续作会），属于版本不兼容，修完也读不了 — 导出试一次就知道。")
         } else if a < 14 && b < 14 {
             lines.append("❌ 存档体检：A、B 两个槽都有扇区损坏（A 槽 \(a)/14，B 槽 \(b)/14）。这份存档本身已经不完整，串到哪个游戏都会报错。建议回旧游戏里重新保存一次，再拿新的 .sav 来串。")
         } else if a < 14 {
