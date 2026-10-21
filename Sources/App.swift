@@ -8,9 +8,9 @@ final class DocumentPickerPresenter: NSObject, UIDocumentPickerDelegate {
     static let shared = DocumentPickerPresenter()
     private var completion: ((URL?) -> Void)?
 
-    func pick(types: [UTType], completion: @escaping (URL?) -> Void) {
+    func pick(types: [UTType], asCopy: Bool = true, completion: @escaping (URL?) -> Void) {
         self.completion = completion
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: asCopy)
         picker.delegate = self
         picker.allowsMultipleSelection = false
         guard let presenter = Self.topViewController() else {
@@ -313,6 +313,8 @@ class AppViewModel: ObservableObject {
 
             if let warn = inspection.warningMessage {
                 triggerAlert(title: "存档体检提醒", body: warn)
+            } else {
+                triggerAlert(title: "✅ 存档导入成功", body: "已加载「\(url.lastPathComponent)」\n大小：\(data.count / 1024) KB")
             }
             statusMessage = "已加载存档：\(url.lastPathComponent)"
         } catch {
@@ -326,6 +328,7 @@ class AppViewModel: ObservableObject {
         do {
             let data = try Data(contentsOf: url)
             loadNewRomData(data: data, name: url.lastPathComponent)
+            triggerAlert(title: "✅ 游戏导入成功", body: "已加载「\(url.lastPathComponent)」\n大小：\(data.count / 1024) KB\nDelta SHA-1：\(data.sha1Hex)")
         } catch {
             triggerAlert(title: "读取 GBA 游戏失败", body: error.localizedDescription)
         }
@@ -400,6 +403,7 @@ class AppViewModel: ObservableObject {
             UserDefaults.standard.set(bookmark, forKey: "DeltaDatabaseBookmark")
             self.deltaFolderBookmark = bookmark
             self.deltaFolderName = "已绑定：\(url.lastPathComponent)"
+            triggerAlert(title: "✅ Delta 目录绑定成功", body: "已绑定文件夹「\(url.lastPathComponent)」，现在可以一键直连注入了。")
         } catch {
             triggerAlert(title: "目录授权失败", body: error.localizedDescription)
         }
@@ -614,7 +618,7 @@ struct MigrationView: View {
                 Section(header: Text("第三步（方式 A）：Delta 数据库文件夹一键直连"),
                         footer: Text("首次使用点上方绑定「我的 iPhone -> Delta -> Database」文件夹，即可一键把存档精准替换进 Delta 内部，无需手动改名。")) {
                     Button(action: {
-                        DocumentPickerPresenter.shared.pick(types: [.folder]) { url in
+                        DocumentPickerPresenter.shared.pick(types: [.folder], asCopy: false) { url in
                             if let url = url { vm.bindDeltaDatabaseFolder(url: url) }
                         }
                     }) {
@@ -654,6 +658,16 @@ struct MigrationView: View {
                         }
                     }
                     .disabled(vm.oldSaveData == nil || vm.newRomData == nil)
+                }
+
+                Section {
+                    HStack {
+                        Spacer()
+                        Text("GBA 串档神器 · 开发者 LengMo")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
                 }
             }
             .navigationTitle("GBA 串档神器")
@@ -821,6 +835,11 @@ struct TimeMachineView: View {
                 }
             }
             .navigationTitle("时光机备份库")
+            .sheet(isPresented: $showShare) {
+                if let url = shareURL {
+                    ShareSheet(items: [url])
+                }
+            }
         }
     }
 }
