@@ -1,6 +1,46 @@
 import SwiftUI
+import UIKit
 import CryptoKit
 import UniformTypeIdentifiers
+
+// MARK: - 0. UIKit 文件选择器（绕开 SwiftUI fileImporter 同页多实例冲突导致的点击无反应）
+final class DocumentPickerPresenter: NSObject, UIDocumentPickerDelegate {
+    static let shared = DocumentPickerPresenter()
+    private var completion: ((URL?) -> Void)?
+
+    func pick(types: [UTType], completion: @escaping (URL?) -> Void) {
+        self.completion = completion
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        guard let presenter = Self.topViewController() else {
+            self.completion = nil
+            completion(nil)
+            return
+        }
+        presenter.present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        let handler = completion
+        completion = nil
+        handler?(urls.first)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        let handler = completion
+        completion = nil
+        handler?(nil)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap { $0.windows }.first { $0.isKeyWindow } ?? scenes.flatMap { $0.windows }.first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        return top
+    }
+}
 
 // MARK: - 1. 安全二进制读取扩展
 extension Data {
@@ -356,7 +396,7 @@ class AppViewModel: ObservableObject {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         do {
-            let bookmark = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+            let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(bookmark, forKey: "DeltaDatabaseBookmark")
             self.deltaFolderBookmark = bookmark
             self.deltaFolderName = "已绑定：\(url.lastPathComponent)"
@@ -520,9 +560,6 @@ struct MainTabView: View {
 // MARK: - Tab 1: 一键串档与 Delta 直连页面
 struct MigrationView: View {
     @EnvironmentObject var vm: AppViewModel
-    @State private var pickingSave = false
-    @State private var pickingRom = false
-    @State private var pickingDeltaFolder = false
     @State private var cleanAutoStates = true
     @State private var showShareSheet = false
     @State private var shareItems: [Any] = []
@@ -531,7 +568,11 @@ struct MigrationView: View {
         NavigationView {
             Form {
                 Section(header: Text("第一步：选择旧版存档 (.sav)")) {
-                    Button(action: { pickingSave = true }) {
+                    Button(action: {
+                        DocumentPickerPresenter.shared.pick(types: [.data, .item]) { url in
+                            if let url = url { vm.importSaveFile(url: url) }
+                        }
+                    }) {
                         HStack {
                             Image(systemName: vm.oldSaveData == nil ? "doc.badge.plus" : "checkmark.seal.fill")
                                 .foregroundColor(vm.oldSaveData == nil ? .blue : .green)
@@ -546,13 +587,14 @@ struct MigrationView: View {
                             }
                         }
                     }
-                    .fileImporter(isPresented: $pickingSave, allowedContentTypes: [.data, .item]) { res in
-                        if case .success(let url) = res { vm.importSaveFile(url: url) }
-                    }
                 }
 
                 Section(header: Text("第二步：选择新版游戏 (.gba)")) {
-                    Button(action: { pickingRom = true }) {
+                    Button(action: {
+                        DocumentPickerPresenter.shared.pick(types: [.data, .item]) { url in
+                            if let url = url { vm.importRomFile(url: url) }
+                        }
+                    }) {
                         HStack {
                             Image(systemName: vm.newRomData == nil ? "gamecontroller.fill" : "checkmark.seal.fill")
                                 .foregroundColor(vm.newRomData == nil ? .orange : .green)
@@ -567,18 +609,16 @@ struct MigrationView: View {
                             }
                         }
                     }
-                    .fileImporter(isPresented: $pickingRom, allowedContentTypes: [.data, .item]) { res in
-                        if case .success(let url) = res { vm.importRomFile(url: url) }
-                    }
                 }
 
                 Section(header: Text("第三步（方式 A）：Delta 数据库文件夹一键直连"),
                         footer: Text("首次使用点上方绑定「我的 iPhone -> Delta -> Database」文件夹，即可一键把存档精准替换进 Delta 内部，无需手动改名。")) {
-                    Button(action: { pickingDeltaFolder = true }) {
+                    Button(action: {
+                        DocumentPickerPresenter.shared.pick(types: [.folder]) { url in
+                            if let url = url { vm.bindDeltaDatabaseFolder(url: url) }
+                        }
+                    }) {
                         Label(vm.deltaFolderName, systemImage: "folder.fill.badge.gearshape")
-                    }
-                    .fileImporter(isPresented: $pickingDeltaFolder, allowedContentTypes: [.folder]) { res in
-                        if case .success(let url) = res { vm.bindDeltaDatabaseFolder(url: url) }
                     }
 
                     Toggle("顺手清理新版自动即时存档（防冲突）", isOn: $cleanAutoStates)
@@ -692,18 +732,15 @@ struct PatcherView: View {
     @State private var baseRomName: String = ""
     @State private var patchData: Data?
     @State private var patchName: String = ""
-    @State private var pickingBaseRom = false
-    @State private var pickingPatch = false
+
 
     var body: some View {
         NavigationView {
             Form {
                 Section(header: Text("1. 选择基础版 GBA 游戏 (.gba)")) {
                     Button(baseRomName.isEmpty ? "点击选择旧版/基础版 .gba" : baseRomName) {
-                        pickingBaseRom = true
-                    }
-                    .fileImporter(isPresented: $pickingBaseRom, allowedContentTypes: [.data, .item]) { res in
-                        if case .success(let url) = res {
+                        DocumentPickerPresenter.shared.pick(types: [.data, .item]) { url in
+                            guard let url = url else { return }
                             let acc = url.startAccessingSecurityScopedResource()
                             defer { if acc { url.stopAccessingSecurityScopedResource() } }
                             baseRomData = try? Data(contentsOf: url)
@@ -714,10 +751,8 @@ struct PatcherView: View {
 
                 Section(header: Text("2. 选择升级补丁文件 (.ips)")) {
                     Button(patchName.isEmpty ? "点击选择 .ips 更新补丁" : patchName) {
-                        pickingPatch = true
-                    }
-                    .fileImporter(isPresented: $pickingPatch, allowedContentTypes: [.data, .item]) { res in
-                        if case .success(let url) = res {
+                        DocumentPickerPresenter.shared.pick(types: [.data, .item]) { url in
+                            guard let url = url else { return }
                             let acc = url.startAccessingSecurityScopedResource()
                             defer { if acc { url.stopAccessingSecurityScopedResource() } }
                             patchData = try? Data(contentsOf: url)
